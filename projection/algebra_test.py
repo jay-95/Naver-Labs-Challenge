@@ -16,24 +16,15 @@ def extract_file_inf(file_name):
 
 
 # Decide whether the image time is near to lidar time
-def find_nearest_time(im_time, lidar_time_list):
-    min_time_distance = abs(im_time - lidar_time_list[0][0])
-    min_lidar_time_index = 1
+def find_nearest_time(im_time, lidar_time_list, ts_range):
 
+    lidar_times = []
     for time_index in range(len(lidar_time_list)):
         lidar_time = lidar_time_list[time_index][0]
-        time_distance = abs(im_time - lidar_time)
-        if time_distance == 0:
-            min_lidar_time_index = time_index
-            break
-        else:
-            if time_distance > min_time_distance:
-                continue
-            elif time_distance < min_time_distance:
-                min_time_distance = time_distance
-                min_lidar_time_index = time_index
+        if ((im_time - ts_range) < lidar_time) and ((im_time + ts_range) > lidar_time):
+            lidar_times.append(str(lidar_time))
 
-    return str(lidar_time_list[min_lidar_time_index][0])
+    return lidar_times
 
 
 # Find pose data according to time stamp data
@@ -121,13 +112,12 @@ im_list = os.listdir(im_path)
 
 
 # 3. Set camera id and time as apart
-tar_image = im_list[1000]
+tar_image = im_list[1200]
 camera_ID, Im_time = extract_file_inf(tar_image)
-print(camera_ID)
 
 
 # 4. Set the lidar ids
-lidar_IDs = ["lidar0"]
+lidar_IDs = ["lidar0", "lidar1"]
 
 
 # 5. Load the database file
@@ -182,34 +172,43 @@ for lidar_ID in lidar_IDs:
     time_list = database[lidar_ID + "_stamp"][:]
 
     # 7. Find the nearest lidar time stamp according to the image
-    min_lidar_time = find_nearest_time(int(Im_time), time_list)
+    min_lidar_times = find_nearest_time(int(Im_time), time_list, 1000000)
+    print(min_lidar_times)
+    print(len(min_lidar_times))
 
 
-    # 1) Load the lidar 0 and lidar 1 point cloud files
-    pc_file_name = lidar_ID + "_" + min_lidar_time + ".pcd"
-    point_cloud = pcl.load(os.path.join(pc_path, pc_file_name))
-    pc = np.array(point_cloud)
+    for idx in min_lidar_times:
 
-    # 2) Load the lidar pose data from DB
-    # 1) Set the name of the lidar pose data
-    l_stamp_name = lidar_ID + "_stamp"
-    l_pose_name = lidar_ID + "_pose"
-
-    # 3) Extract the lidar pose parameter according to time stamp index
-    l_t_index = find_pose_data(database, l_stamp_name, min_lidar_time)
-    lidar_pose_param = database[l_pose_name][l_t_index]
+        # 1) Load the lidar 0 and lidar 1 point cloud files
+        pc_file_name = lidar_ID + "_" + idx + ".pcd"
+        point_cloud = pcl.load(os.path.join(pc_path, pc_file_name))
+        pc = np.array(point_cloud)
+        print(len(pc))
+        invalid = np.logical_and(np.logical_and(pc[:, 0] == 0, pc[:, 1] == 0), pc[:, 2] == 0)
+        pc = pc[~invalid]
+        print(len(pc))
 
 
-    # 4) Calculate rotation matrix using quaternion parameters
-    lqw, lqx, lqy, lqz = lidar_pose_param[3:]
-    l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_dcm()
-    l_trans = rot_2_trans_mat(lidar_pose_param[:3], l_rotation)
+        # 2) Load the lidar pose data from DB
+        # 1) Set the name of the lidar pose data
+        l_stamp_name = lidar_ID + "_stamp"
+        l_pose_name = lidar_ID + "_pose"
 
-    # 5) Transform 3d points matrix into homogeneous shape
-    pc_homo = np.c_[pc, np.ones([len(pc), 1])]
+        # 3) Extract the lidar pose parameter according to time stamp index
+        l_t_index = find_pose_data(database, l_stamp_name, idx)
+        lidar_pose_param = database[l_pose_name][l_t_index]
 
-    # 6) Transform lidar frame points to world frame point using lidar transformation matrix
-    l_pc.append(np.matmul(l_trans, pc_homo.T).T)
+
+        # 4) Calculate rotation matrix using quaternion parameters
+        lqw, lqx, lqy, lqz = lidar_pose_param[3:]
+        l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_dcm()
+        l_trans = rot_2_trans_mat(lidar_pose_param[:3], l_rotation)
+
+        # 5) Transform 3d points matrix into homogeneous shape
+        pc_homo = np.c_[pc, np.ones([len(pc), 1])]
+
+        # 6) Transform lidar frame points to world frame point using lidar transformation matrix
+        l_pc.append(np.matmul(l_trans, pc_homo.T).T)
 
 
 l_pc = np.concatenate(l_pc, axis=0)
@@ -233,6 +232,7 @@ c_l_pc = np.matmul(inv(c_trans), l_pc.T).T
 pos_z = np.where(c_l_pc[:, 2] > 0)
 c_l_pc = c_l_pc[pos_z]
 
+
 # 2. Project the 3D camera frame points onto the image
 # 1) Set all the intrinsic matrices such as projection and calibration
 proj_mat = np.c_[np.identity(3), np.zeros([3, 1])]
@@ -255,7 +255,7 @@ inside = np.logical_and(np.logical_and(calib_pc[:, 0] >= 0, calib_pc[:, 1] >= 0)
 
 prj_pix_points = calib_pc[inside]
 
-
+l_pc = l_pc[pos_z][inside]
 
 
 """

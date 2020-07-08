@@ -15,24 +15,15 @@ def extract_file_inf(file_name):
 
 
 # Decide whether the image time is near to lidar time
-def find_nearest_time(im_time, lidar_time_list):
-    min_time_distance = abs(im_time - lidar_time_list[0][0])
-    min_lidar_time_index = 1
+def find_nearest_time(im_time, lidar_time_list, ts_range):
 
+    lidar_times = []
     for time_index in range(len(lidar_time_list)):
         lidar_time = lidar_time_list[time_index][0]
-        time_distance = abs(im_time - lidar_time)
-        if time_distance == 0:
-            min_lidar_time_index = time_index
-            break
-        else:
-            if time_distance > min_time_distance:
-                continue
-            elif time_distance < min_time_distance:
-                min_time_distance = time_distance
-                min_lidar_time_index = time_index
+        if ((im_time - ts_range) < lidar_time) and ((im_time + ts_range) > lidar_time):
+            lidar_times.append(str(lidar_time))
 
-    return str(lidar_time_list[min_lidar_time_index][0])
+    return lidar_times
 
 
 # Find pose data according to time stamp data
@@ -166,8 +157,6 @@ text.close()
 cam_int_params = find_cam_int_param(camera_ID, camera_parameters)
 sx, sy, fx, fy, cx, cy, k1, k2, p1, p2, k3 = map(float, cam_int_params[1:])
 
-
-
 l_pc = []
 
 for lidar_ID in lidar_IDs:
@@ -176,69 +165,83 @@ for lidar_ID in lidar_IDs:
     time_list = database[lidar_ID + "_stamp"][:]
 
     # 7. Find the nearest lidar time stamp according to the image
-    min_lidar_time = find_nearest_time(int(Im_time), time_list)
+    min_lidar_times = find_nearest_time(int(Im_time), time_list, 2000000)
+
+    for idx in min_lidar_times:
+        # 1) Load the lidar 0 and lidar 1 point cloud files
+        pc_file_name = lidar_ID + "_" + idx + ".pcd"
+        point_cloud = pcl.load(os.path.join(pc_path, pc_file_name))
+        pc = np.array(point_cloud)
+        invalid = np.logical_and(np.logical_and(pc[:, 0] == 0, pc[:, 1] == 0), pc[:, 2] == 0)
+        pc = pc[~invalid]
 
 
-    # 1) Load the lidar 0 and lidar 1 point cloud files
-    pc_file_name = lidar_ID + "_" + min_lidar_time + ".pcd"
-    point_cloud = pcl.load(os.path.join(pc_path, pc_file_name))
-    pc = np.array(point_cloud)
+        # 2) Load the lidar pose data from DB
+        # 1) Set the name of the lidar pose data
+        l_stamp_name = lidar_ID + "_stamp"
+        l_pose_name = lidar_ID + "_pose"
 
-    # 2) Load the lidar pose data from DB
-    # 1) Set the name of the lidar pose data
-    l_stamp_name = lidar_ID + "_stamp"
-    l_pose_name = lidar_ID + "_pose"
+        # 3) Extract the lidar pose parameter according to time stamp index
+        l_t_index = find_pose_data(database, l_stamp_name, idx)
+        lidar_pose_param = database[l_pose_name][l_t_index]
 
-    # 3) Extract the lidar pose parameter according to time stamp index
-    l_t_index = find_pose_data(database, l_stamp_name, min_lidar_time)
-    lidar_pose_param = database[l_pose_name][l_t_index]
+        # 4) Calculate rotation matrix using quaternion parameters
+        lqw, lqx, lqy, lqz = lidar_pose_param[3:]
+        l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_dcm()
+        l_trans = rot_2_trans_mat(lidar_pose_param[:3], l_rotation)
 
+        # 5) Transform 3d points matrix into homogeneous shape
+        pc_homo = np.c_[pc, np.ones([len(pc), 1])]
 
-    # 4) Calculate rotation matrix using quaternion parameters
-    lqw, lqx, lqy, lqz = lidar_pose_param[3:]
-    l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_dcm()
-    l_trans = rot_2_trans_mat(lidar_pose_param[:3], l_rotation)
-
-    # 5) Transform 3d points matrix into homogeneous shape
-    pc_homo = np.c_[pc, np.ones([len(pc), 1])]
-
-    # 6) Transform lidar frame points to world frame point using lidar transformation matrix
-    l_pc.append(np.matmul(l_trans, pc_homo.T).T)
+        # 6) Transform lidar frame points to world frame point using lidar transformation matrix
+        l_pc.append(np.matmul(l_trans, pc_homo.T).T)
 
 
 l_pc = np.concatenate(l_pc, axis=0)
 
 
+# 1. Transform lidar frame points to camera frame points using extrinsic matrices
+# 1) Calculate rotation matrix using quaternion parameters
 cqw, cqx, cqy, cqz = camera_pose_param[3:]
 c_rotation = R.from_quat([cqx, cqy, cqz, cqw]).as_dcm()
 
 
+# 2) Make transformation matrix using rotation and translation matrix
 c_trans = rot_2_trans_mat(camera_pose_param[:3], c_rotation)
 
 
+# 5) Transform world frame points to camera frame point using inversed camera transformation matrix
 c_l_pc = np.matmul(inv(c_trans), l_pc.T).T
 
 
+# 3) Extract the points contain positive integer of z(z+)
 pos_z = np.where(c_l_pc[:, 2] > 0)
 c_l_pc = c_l_pc[pos_z]
 
 
+# 2. Project the 3D camera frame points onto the image
+# 1) Set all the intrinsic matrices such as projection and calibration
 proj_mat = np.c_[np.identity(3), np.zeros([3, 1])]
 calib_mat = calib_matrix_cal(fx, fy, cx, cy)
 
 
+# 2) Calculate the camera calibration using intrinsic matrices
 prj_pc = np.matmul(proj_mat, c_l_pc.T).T
 prj_point = prj_pc/prj_pc[:, 2][:, None]
 
 
+# 4) Calculate pixel coordinate system by dividing z and distortion
 dist_pix_point = distortion(prj_point, k1, k2, k3, p1, p2)
 calib_pc = np.matmul(calib_mat, dist_pix_point.T).T
 
 
+# 5) Extract pixel points inside of image frame
 inside = np.logical_and(np.logical_and(calib_pc[:, 0] >= 0, calib_pc[:, 1] >= 0),
                         np.logical_and(calib_pc[:, 0] < sx, calib_pc[:, 1] < sy))
 
 prj_pix_points = calib_pc[inside]
+
+l_pc = l_pc[pos_z][inside]
 
 
 train_image = cv2.imread(os.path.join(train_image_path, train_image_name), cv2.IMREAD_UNCHANGED)
@@ -250,6 +253,9 @@ plt.imshow(train_image)
 plt.scatter(prj_pix_points[:, 0], prj_pix_points[:, 1], s=1, c = 'r', edgecolors='none')
 
 plt.figure(2)
+plt.imshow(train_image)
+
+plt.figure(3)
 plt.imshow(test_image)
 
 
@@ -258,7 +264,6 @@ plt.imshow(test_image)
 Root_SIFT
 """
 kp1, des1, kp2, des2 = compute(test_image, train_image)
-
 bf = cv2.BFMatcher()
 matches = bf.knnMatch(des1, des2, k=2)
 good = []
@@ -268,10 +273,27 @@ for m,n in matches:
     if m.distance < 0.6 * n.distance:
         good.append([m])
 
-print(len(good))
 
 draw_image = cv2.drawMatchesKnn(test_image, kp1, train_image, kp2, good, None, flags = 2, matchColor = [255, 255, 255])
 
-plt.figure(3)
+list_kp1 = []
+list_kp2 = []
+
+for g in good:
+    test_idx = g[-1].queryIdx
+    train_idx = g[-1].trainIdx
+
+    (x1, y1) = kp1[test_idx].pt
+    (x2, y2) = kp2[train_idx].pt
+
+    list_kp1.append((x1, y1))
+    list_kp2.append((x2, y2))
+
+plt.figure(4)
 plt.imshow(draw_image)
+
+
+print(list_kp1)
+print(list_kp2)
+
 plt.show()
