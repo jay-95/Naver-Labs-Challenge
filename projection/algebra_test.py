@@ -6,7 +6,6 @@ from numpy.linalg import inv
 import cv2
 from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation as R
-from mpl_toolkits.mplot3d import Axes3D
 
 # Extract file's information such as IDs and times
 def extract_file_inf(file_name):
@@ -101,7 +100,7 @@ According to camera id, lidar id and time stamps, find the pose data from DB tha
 
 
 # 1. Directory setting
-default_path = "/home/dnjswo0205/Desktop/dataset/b1/train/2019-04-16_16-14-48"
+default_path = "/home/dnjswo0205/Desktop/dataset/b1/train/2019-04-16_15-35-46"
 pc_path = os.path.join(default_path, "pointclouds_data")
 im_path = os.path.join(default_path, "images")
 
@@ -112,7 +111,7 @@ im_list = os.listdir(im_path)
 
 
 # 3. Set camera id and time as apart
-tar_image = im_list[1200]
+tar_image = im_list[1000]
 camera_ID, Im_time = extract_file_inf(tar_image)
 
 
@@ -145,14 +144,14 @@ camera_parameters = []
 
 lines = text.readlines()
 for line in lines[4:]:
-    camera_parameters.append(line[:-1].split(" "))
+    if line[0] != " " and line[0] != "\n":
+        camera_parameters.append(line[:-1].split(" "))
 text.close()
 
 
 # 3) Extract camera information from camera_parameters
 cam_int_params = find_cam_int_param(camera_ID, camera_parameters)
 sx, sy, fx, fy, cx, cy, k1, k2, p1, p2, k3 = map(float, cam_int_params[1:])
-
 
 """
 Calculate the projection from 3D point cloud to 2D image
@@ -172,8 +171,7 @@ for lidar_ID in lidar_IDs:
     time_list = database[lidar_ID + "_stamp"][:]
 
     # 7. Find the nearest lidar time stamp according to the image
-    min_lidar_times = find_nearest_time(int(Im_time), time_list, 1000000)
-    print(min_lidar_times)
+    min_lidar_times = find_nearest_time(int(Im_time), time_list, 2500000)
     print(len(min_lidar_times))
 
 
@@ -183,10 +181,8 @@ for lidar_ID in lidar_IDs:
         pc_file_name = lidar_ID + "_" + idx + ".pcd"
         point_cloud = pcl.load(os.path.join(pc_path, pc_file_name))
         pc = np.array(point_cloud)
-        print(len(pc))
         invalid = np.logical_and(np.logical_and(pc[:, 0] == 0, pc[:, 1] == 0), pc[:, 2] == 0)
         pc = pc[~invalid]
-        print(len(pc))
 
 
         # 2) Load the lidar pose data from DB
@@ -201,7 +197,7 @@ for lidar_ID in lidar_IDs:
 
         # 4) Calculate rotation matrix using quaternion parameters
         lqw, lqx, lqy, lqz = lidar_pose_param[3:]
-        l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_dcm()
+        l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_matrix()
         l_trans = rot_2_trans_mat(lidar_pose_param[:3], l_rotation)
 
         # 5) Transform 3d points matrix into homogeneous shape
@@ -217,7 +213,7 @@ l_pc = np.concatenate(l_pc, axis=0)
 # 1. Transform lidar frame points to camera frame points using extrinsic matrices
 # 1) Calculate rotation matrix using quaternion parameters
 cqw, cqx, cqy, cqz = camera_pose_param[3:]
-c_rotation = R.from_quat([cqx, cqy, cqz, cqw]).as_dcm()
+c_rotation = R.from_quat([cqx, cqy, cqz, cqw]).as_matrix()
 
 
 # 2) Make transformation matrix using rotation and translation matrix
@@ -268,12 +264,10 @@ Then copy the image data and draw points on it
 image = cv2.imread(os.path.join(im_path, tar_image), cv2.IMREAD_UNCHANGED)
 
 
-plt.rcParams['figure.dpi'] = 200
-
 
 plt.figure(1)
 plt.imshow(image)
-plt.scatter(prj_pix_points[:, 0], prj_pix_points[:, 1], s=1, c = 'r', edgecolors='none')
+plt.scatter(prj_pix_points[:, 0], prj_pix_points[:, 1], s=1, c = c_l_pc[inside][:,2], edgecolors='none')
 
 plt.figure(2)
 plt.imshow(image)

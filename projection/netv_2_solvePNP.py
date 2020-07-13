@@ -153,7 +153,6 @@ for line in lines[4:]:
         camera_parameters.append(line[:-1].split(" "))
 text.close()
 
-
 cam_int_params = find_cam_int_param(camera_ID, camera_parameters)
 sx, sy, fx, fy, cx, cy, k1, k2, p1, p2, k3 = map(float, cam_int_params[1:])
 
@@ -187,7 +186,7 @@ for lidar_ID in lidar_IDs:
 
         # 4) Calculate rotation matrix using quaternion parameters
         lqw, lqx, lqy, lqz = lidar_pose_param[3:]
-        l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_dcm()
+        l_rotation = R.from_quat([lqx, lqy, lqz, lqw]).as_matrix()
         l_trans = rot_2_trans_mat(lidar_pose_param[:3], l_rotation)
 
         # 5) Transform 3d points matrix into homogeneous shape
@@ -203,7 +202,7 @@ l_pc = np.concatenate(l_pc, axis=0)
 # 1. Transform lidar frame points to camera frame points using extrinsic matrices
 # 1) Calculate rotation matrix using quaternion parameters
 cqw, cqx, cqy, cqz = camera_pose_param[3:]
-c_rotation = R.from_quat([cqx, cqy, cqz, cqw]).as_dcm()
+c_rotation = R.from_quat([cqx, cqy, cqz, cqw]).as_matrix()
 
 
 # 2) Make transformation matrix using rotation and translation matrix
@@ -250,14 +249,13 @@ test_image = cv2.imread(os.path.join(test_image_path, test_image_name), cv2.IMRE
 
 plt.figure(1)
 plt.imshow(train_image)
-plt.scatter(prj_pix_points[:, 0], prj_pix_points[:, 1], s=1, c = 'r', edgecolors='none')
+plt.scatter(prj_pix_points[:, 0], prj_pix_points[:, 1], s=1, c = c_l_pc[inside][:,2], edgecolors='none')
 
 plt.figure(2)
 plt.imshow(train_image)
 
 plt.figure(3)
 plt.imshow(test_image)
-
 
 
 """
@@ -274,7 +272,7 @@ for m,n in matches:
         good.append([m])
 
 
-draw_image = cv2.drawMatchesKnn(test_image, kp1, train_image, kp2, good, None, flags = 2, matchColor = [255, 255, 255])
+draw_image = cv2.drawMatchesKnn(test_image, kp1, train_image, kp2, good, None, flags = 2)
 
 list_kp1 = []
 list_kp2 = []
@@ -293,7 +291,70 @@ plt.figure(4)
 plt.imshow(draw_image)
 
 
-print(list_kp1)
-print(list_kp2)
-
 plt.show()
+
+"""
+Match 2D key points with 3D world frame points
+"""
+
+kp3d = []
+kp2d = []
+print(l_pc)
+
+for kp_idx in range(len(list_kp2)):
+    train_kpx = list_kp2[kp_idx][0]
+    train_kpy = list_kp2[kp_idx][0]
+
+    px = prj_pix_points[:, 0]
+    py = prj_pix_points[:, 1]
+
+    dis_x = px - train_kpx
+    dis_y = py - train_kpy
+
+    min_dis = np.sqrt(dis_x*dis_x + dis_y*dis_y)
+
+    if min(min_dis) >= 1:
+        continue
+
+    min_idx = np.argmin(min_dis)
+    kp3d.append(l_pc[min_idx][:3])
+    kp2d.append(list_kp1[kp_idx])
+
+kp3d = np.array(kp3d)
+kp2d = np.array(kp2d)
+
+
+"""
+Solve PnP
+"""
+ttext = open(os.path.join(test_path, camera_para_name), "r")
+
+
+tcamera_parameters = []
+
+tlines = ttext.readlines()
+for tline in tlines[4:]:
+    if tline[0] != " " and tline[0] != "\n":
+        tcamera_parameters.append(tline[:-1].split(" "))
+ttext.close()
+
+tcamera_ID, _ = extract_file_inf(test_image_name)
+
+tcam_int_params = find_cam_int_param(tcamera_ID, tcamera_parameters)
+tsx, tsy, tfx, tfy, tcx, tcy, tk1, tk2, tp1, tp2, tk3 = map(float, tcam_int_params[1:])
+
+
+distCoeffs = np.array([tk1, tk2, tp1, tp2, tk3])
+_, rvec, tvec, _ = cv2.solvePnPRansac(kp3d, kp2d, calib_mat, distCoeffs)
+rmat = R.from_rotvec([rvec[0][0], rvec[1][0], rvec[2][0]]).as_matrix()
+
+est_rmat, _ = cv2.Rodrigues(rvec, rmat)
+
+est_quat = R.from_matrix(inv(est_rmat)).as_quat()
+ext_tran = np.matmul(-inv(est_rmat), tvec)
+
+
+print(est_quat)
+print(cqx,cqy,cqz,cqw)
+print(ext_tran)
+print(camera_pose_param[:3])
